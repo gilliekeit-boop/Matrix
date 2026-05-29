@@ -1,1 +1,166 @@
+name: Autonomous Matrix Sync Engine
 
+on:
+  schedule:
+    # Runs automatically every hour, 24/7
+    - cron: '0 * * * *'
+  workflow_dispatch: # Allows you to trigger it manually anytime with one click!
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository code
+      uses: actions/checkout@v3
+
+    - name: Set up Python Environment
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+
+    - name: Install Network Dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install requests
+
+    - name: Execute Matrix Calculations
+      env:
+        # We pass your secure secret directly into the environment securely
+        GH_TOKEN: $ {{ secrets. GH_TOKENS }}
+      run: |
+        cat << 'EOF' > run_sync.py
+        import requests
+        from datetime import datetime
+        import base64
+        import os
+
+        def calculate_expected_value(mozzart_odds, api_probabilities):
+            ev_results = {}
+            for outcome in ['1', 'X', '2']:
+                odds = mozzart_odds.get(outcome, 1.0)
+                prob = api_probabilities.get(outcome, 0.33)
+                ev = (prob * odds) - (1.0 - prob)
+                ev_results[outcome] = round(ev, 2)
+            return ev_results
+
+        def fetch_live_stream():
+            url = "https://www.mozzartbet.co.ke/rest/v1/jackpot/active"
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Linux; Android 13; TECNO CK6n) AppleWebKit/537.36 Mobile Safari/537.36",
+                "Accept": "application/json",
+                "Origin": "https://m.mozzartbet.co.ke"
+            }
+            try:
+                response = requests.get(url, headers=headers, timeout=12)
+                if response.status_code == 200:
+                    return response.json().get('jackpotMatches', [])
+            except Exception:
+                pass
+            return None
+
+        def push_to_github_api(html_content):
+            token = os.environ.get("GH_TOKEN")
+            url = "https://api.github.com/repos/gilliekeit-boop/Matrix/contents/index.html"
+            headers = {
+                "Authorization": f"token {token}",
+                "Accept": "application/vnd.github.v3+json"
+            }
+            
+            sha = None
+            get_resp = requests.get(url, headers=headers)
+            if get_resp.status_code == 200:
+                sha = get_resp.json().get('sha')
+                
+            encoded_content = base64.b64encode(html_content.encode('utf-8')).decode('utf-8')
+            
+            payload = {
+                "message": f"Autonomous Cloud Sync: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                "content": encoded_content,
+                "branch": "main"
+            }
+            if sha:
+                payload["sha"] = sha
+                
+            requests.put(url, headers=headers, json=payload)
+
+        raw_matches = fetch_live_stream()
+        if not raw_matches:
+            print("No streams fetched.")
+            exit(0)
+
+        current_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        processed_games = []
+        
+        for idx, item in enumerate(raw_matches, 1):
+            try:
+                home = item.get('home', 'Home Team')
+                away = item.get('away', 'Away Team')
+                match_id = item.get('id', idx)
+                odds_data = item.get('odds', {})
+                
+                mozzart = {
+                    "1": float(odds_data.get('1', 2.0)),
+                    "X": float(odds_data.get('X', 3.0)),
+                    "2": float(odds_data.get('2', 3.0))
+                }
+                
+                sum_inv = (1.0/mozzart["1"]) + (1.0/mozzart["X"]) + (1.0/mozzart["2"])
+                api_prob = {"1": (1.0/mozzart["1"])/sum_inv, "X": (1.0/mozzart["X"])/sum_inv, "2": (1.0/mozzart["2"])/sum_inv}
+                ev = calculate_expected_value(mozzart, api_prob)
+                
+                processed_games.append({"count": idx, "id": match_id, "home": home, "away": away, "mozzart": mozzart, "ev": ev})
+            except Exception:
+                continue
+
+        html_layout = f"""<!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Chebet Live Cloud Matrix</title>
+            <style>
+                body {{ font-family: system-ui, -apple-system, sans-serif; background-color: #0d0e12; color: #e2e8f0; margin: 0; padding: 12px; }}
+                .wrapper {{ max-width: 480px; margin: 0 auto; }}
+                .header {{ text-align: center; padding: 15px 0; border-bottom: 2px dashed #1e293b; margin-bottom: 20px; }}
+                h1 {{ color: #00ffcc; font-size: 20px; text-transform: uppercase; letter-spacing: 1px; margin: 0; }}
+                .card {{ background: #151922; border: 1px solid #222c3f; border-radius: 8px; padding: 12px; margin-bottom: 12px; }}
+                .match-meta {{ display: flex; justify-content: space-between; font-size: 13px; font-weight: bold; margin-bottom: 10px; color: #fff; }}
+                .grid {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; text-align: center; margin-bottom: 4px; font-size: 12px; }}
+                .lbl {{ font-size: 9px; color: #64748b; text-transform: uppercase; font-weight: bold; }}
+                .box {{ background: #1e2533; padding: 6px; border-radius: 4px; border: 1px solid #2a364f; }}
+                .pos {{ color: #00ff66; font-weight: bold; background: rgba(0,255,102,0.07); border-color: rgba(0,255,102,0.3); }}
+            </style>
+        </head>
+        <body>
+            <div class="wrapper">
+                <div class="header">
+                    <h1>Chebet Autonomous Matrix</h1>
+                    <p style="color: #64748b; font-size: 11px; margin: 4px 0 0 0;">Last Server Refreshed: {{current_time_str}} UTC</p>
+                </div>
+        """
+        for g in processed_games:
+            html_layout += f"""
+            <div class="card">
+                <div class="match-meta">
+                    <span><span style="color:#00ffcc;">G{{g['count']:02d}}:</span> {{g['home']}} vs {{g['away']}}</span>
+                    <span style="color:#64748b; font-size:10px;">ID: {{g['id']}}</span>
+                </div>
+                <div class="grid lbl"><div>1</div><div>X</div><div>2</div></div>
+                <div class="grid">
+                    <div class="box">{{g['mozzart']['1']:.2f}}</div>
+                    <div class="box">{{g['mozzart']['X']:.2f}}</div>
+                    <div class="box">{{g['mozzart']['2']:.2f}}</div>
+                </div>
+                <div class="grid lbl" style="margin-top:6px;"><div>EV Edge</div><div>EV Edge</div><div>EV Edge</div></div>
+                <div class="grid">
+                    <div class="box {{"pos" if g['ev']['1'] > 0.05 else ""}}">{{g['ev']['1']:+.2f}}</div>
+                    <div class="box {{"pos" if g['ev']['X'] > 0.05 else ""}}">{{g['ev']['X']:+.2f}}</div>
+                    <div class="box {{"pos" if g['ev']['2'] > 0.05 else ""}}">{{g['ev']['2']:+.2f}}</div>
+                </div>
+            </div>
+            """
+        html_layout += "</div></body></html>"
+        push_to_github_api(html_layout)
+        EOF
+        python run_sync.py
